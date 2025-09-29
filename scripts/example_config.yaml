@@ -1,0 +1,11 @@
+## Reference files
+NG_008376_REFSEQ: "../data/NG_008376.fasta"
+HUMAN_REF: "/path/to/ref/hg38/genome/hg38.analysisSet.fa"
+STAR_ALLELE_DEFINITIONS: "../data/CYP2D6_allele_definition_table_250121_cleaned250121.xls"
+
+## Source directories
+BASECALLED_DIR: "/path/to/basecalled/data/"
+
+## Working directories
+WORKING_DIR: "/path/to/output/directory/"
+SCRATCH_DIR: "/path/to/scratch/space/"

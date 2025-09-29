@@ -1,0 +1,985 @@
+---
+title: "CYP2D6-ONT - Recursive Allele Sequence Reconstruction"
+author: "Scott Brown"
+date: "2025-09-09"
+output:
+  pdf_document:
+    includes:
+      in_header: preamble.tex
+classoption: landscape
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+ROOT_DIR <- "/path/to/working/directory/"
+
+knitr::opts_knit$set(root.dir = ROOT_DIR)
+
+knitr::opts_chunk$set(fig.pos = 'htbp')
+
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(xtable)
+library(ggsci)
+
+## list of CPIC known variant positions
+pois <- c(5033.0, 5038.0, 5050.0, 5082.0, 5092.0, 5096.0, 5101.0, 5119.0, 5143.0, 5144.0, 5156.5, 5901.0, 5905.0, 5924.0, 5975.0, 5984.0, 5990.0, 5992.0, 6002.0, 6031.0, 6032.0, 6040.0, 6041.0, 6046.0, 6052.0, 6628.0, 6631.0, 6637.0, 6645.0, 6656.0, 6677.0, 6679.0, 6681.0, 6698.0, 6713.0, 6724.0, 6727.0, 6736.0, 6740.0, 6755.0, 6769.0, 6774.0, 6775.0, 6778.0, 6866.0, 6868.5, 6907.5, 6932.0, 6933.0, 6963.0, 6993.5, 6999.0, 7015.0, 7460.0, 7482.0, 7486.0, 7503.0, 7539.0, 7557.0, 7558.0, 7559.0, 7560.0, 7569.0, 7576.0, 7592.5, 7594.0, 7599.0, 7605.0, 7606.0, 7607.0, 7608.0, 7626.0, 7630.0, 7633.0, 7634.0, 7635.0, 7838.0, 7848.0, 7870.0, 7873.0, 7889.0, 7912.0, 7947.0, 7948.0, 7949.0, 7950.0, 7951.0, 7952.0, 7953.0, 7954.0, 7955.0, 7956.0, 7957.0, 7958.0, 7959.0, 7960.0, 7961.0, 7962.0, 7963.0, 7964.0, 7965.0, 7970.0, 8008.0, 8180.0, 8192.0, 8200.0, 8201.0, 8203.0, 8209.0, 8218.0, 8221.0, 8222.0, 8246.0, 8255.0, 8280.5, 8285.0, 8288.0, 8297.0, 8299.0, 8338.0, 8354.0, 8828.0, 8829.0, 8855.0, 8873.0, 8885.0, 8897.0, 8915.0, 8934.0, 9059.0, 9062.0, 9064.0, 9065.0, 9076.0, 9092.0, 9114.0, 9130.0, 9144.5, 9148.0, 9151.0, 9164.0, 9175.0, 9176.0, 9177.0, 9178.0, 9184.0, 9187.0, 9188.0, 9200.0, 9206.0, 9233.0)
+
+## list of exon boundaries
+gene_coords <- list(exon1 = c(5001:5199),
+                    exon2 = c(5902:6073),
+                    exon3 = c(6626:6778),
+                    exon4 = c(6867:7027),
+                    exon5 = c(7461:7637),
+                    exon6 = c(7828:7969),
+                    exon7 = c(8177:8364),
+                    exon8 = c(8819:8960),
+                    exon9 = c(9059:9237))
+
+CYP2D6_GENOMIC_CHR   <- "chr22"
+CYP2D6_GENOMIC_START <- 42124499
+CYP2D6_GENOMIC_END   <- 42135810
+
+
+
+```
+
+## CYP2D6-ONT Genotyping
+
+Load in data.
+
+```{r data, message=TRUE, include=FALSE}
+
+patients <- list.dirs(ROOT_DIR, recursive = F, full.names = F)
+
+
+IN_HOUSE_CONTROLS <- c("NA02016", "NA10005", "NA17300")
+SRA_CONTROLS <- patients[grepl("_ligate", patients)]
+LIAU_CONTROLS <- c("NA07439", "NA12878", "NA18518", "NA21781", "NA23297", "NA23348", "NA23405")
+
+## basecalled and porechopped
+basecall_read_counts <- list()
+for(pt in patients){
+  basecall_read_counts[[pt]] <- as.numeric(paste(readLines(paste0(ROOT_DIR, pt, "/00_fastq/all.fastq.numreads")), collapse=" "))
+}
+
+## length of porechopped reads
+read_lens <- list()
+for(pt in patients){
+  read_lens[[pt]] <- read.table(paste0(ROOT_DIR, pt, "/00_fastq/readlens.txt"), header=F, stringsAsFactors = F)
+}
+
+
+## make dataframes with amp id, number of reads, length, location for each patient.
+amp_stats <- list()
+
+## number of inferred amplicons
+inf_amp <- list()
+for(pt in patients){
+  ## number of amplicons inferred is max amplicon id + 1 (since ids start at 0)
+  inf_amp[[pt]] <- max(as.integer(gsub(".*amp([0-9]+)\\.numreads$", "\\1", list.files(path=paste0(ROOT_DIR,pt,"/01_alignment/"), pattern = "candidate_reads_amp[0-9]+\\.numreads")))) + 1
+}
+
+# number of candidate reads per amplicon
+for(pt in patients){
+  for(amp in 0:(inf_amp[[pt]]-1)){
+    amp_stats[[pt]] <- rbind(amp_stats[[pt]], data.frame(ampid = amp, numreads = as.numeric(paste(readLines(paste0(ROOT_DIR, pt, "/01_alignment/candidate_reads_amp",amp,".numreads")), collapse=" "))))
+  }
+}
+
+## length and identity of amplicons
+for(pt in patients){
+  for(amp in 0:(inf_amp[[pt]]-1)){
+    genomic_region <- readLines(paste0(ROOT_DIR, pt, "/01_alignment/alignment_genome_01.amplicon_",amp,".bed"))
+    chrom <- strsplit(genomic_region, "\t")[[1]][1]
+    start <- as.numeric(strsplit(genomic_region, "\t")[[1]][2])
+    end <- as.numeric(strsplit(genomic_region, "\t")[[1]][3])
+    amp_stats[[pt]]$chrom[amp_stats[[pt]]$ampid == amp] <- chrom
+    amp_stats[[pt]]$start[amp_stats[[pt]]$ampid == amp] <- start
+    amp_stats[[pt]]$end[amp_stats[[pt]]$ampid == amp] <- end
+    amp_stats[[pt]]$length[amp_stats[[pt]]$ampid == amp] <- end - start + 1
+  }
+}
+
+## length-clustering lengths
+amp_stats_lenclust <- list()
+for(pt in patients){
+  for(amp in amp_stats[[pt]]$ampid){
+    lenclust <- read.table(paste0(ROOT_DIR, pt, "/02_clusters/cluster_stats_amp",amp,".tsv"), header=T, stringsAsFactors=F, sep="\t")
+    names(lenclust) <- c("lenclust", "lenclust_numreads", "lenclust_mean_length")
+    lenclust$ampid <- amp
+    lenclust <- merge(subset(amp_stats[[pt]], ampid==amp), lenclust, all=T)
+    amp_stats_lenclust[[pt]] <- rbind(amp_stats_lenclust[[pt]], lenclust)
+  }
+}
+
+## get the clusters that were used for each patient.
+for(pt in patients){
+  amp_stats_lenclust[[pt]]$consensus_attempted <- FALSE
+  for(amp in amp_stats[[pt]]$ampid){
+    files <- list.files(paste0(ROOT_DIR, pt, "/05_consensus/"), pattern = paste0("^",pt,"_amp",amp,"_lenclust.*_alleles.tsv$"), full.names = F)
+    for(fl in files){
+      cid <- sub(paste0("^",pt,"_amp",amp,"_lenclust(\\d+)_alleles\\.tsv"), "\\1", fl)
+      amp_stats_lenclust[[pt]]$consensus_attempted[amp_stats_lenclust[[pt]]$ampid == amp & amp_stats_lenclust[[pt]]$lenclust == cid] <- TRUE
+    }
+  }
+}
+
+## get number of reads used for each consensus sequence (built iteratively so some reads will have been discarded compared to the source cluster)
+amp_stats_lenclust_consensus <- list()
+for(pt in patients){
+  for(amp in amp_stats[[pt]]$ampid){
+    for(lc in amp_stats_lenclust[[pt]]$lenclust[amp_stats_lenclust[[pt]]$ampid==amp & amp_stats_lenclust[[pt]]$consensus_attempted]){
+      lines <- readLines(paste0(ROOT_DIR, pt, "/05_consensus/", pt, "_amp",amp,"_lenclust", lc, "_consensus.fasta"))
+      if(length(lines) > 0){
+        for(line in lines){
+          if(grepl(">",line)){
+            line <- strsplit(line, "_")
+            con_id <- line[[1]][3]
+            reads <- as.numeric(gsub("reads","",line[[1]][4]))
+            depths <- subset(amp_stats_lenclust[[pt]], ampid == amp & lenclust == lc)
+            depths$consensus_id <- paste0("amp",amp, "_lenclust",lc, "_", con_id)
+            depths$consensus_depth <- reads
+            amp_stats_lenclust_consensus[[pt]] <- rbind(amp_stats_lenclust_consensus[[pt]], depths)
+          }
+        }
+      }else{
+        ## no consensus made, but it was attempted.
+        depths <- subset(amp_stats_lenclust[[pt]], ampid == amp & lenclust == lc)
+        depths$consensus_id <- NA
+        depths$consensus_depth <- NA
+        amp_stats_lenclust_consensus[[pt]] <- rbind(amp_stats_lenclust_consensus[[pt]], depths)
+      }
+    }
+  }
+}
+
+
+
+
+
+
+## per-position base frequencies ("chromatogram" data)
+complement_map <- c(A = "T", T = "A", C = "G", G = "C", " " = " ")
+consensuses <- list()
+for(pt in patients){
+  consensuses[[pt]] <- list()
+  for(amp in amp_stats[[pt]]$ampid){
+    for(lc in unique(amp_stats_lenclust_consensus[[pt]]$lenclust[amp_stats_lenclust_consensus[[pt]]$ampid == amp])){
+      resfile <- paste0(ROOT_DIR, pt, "/05_consensus/", pt, "_amp",amp,"_lenclust", lc, "_chromatogram-data.tsv")
+      message("Loading file ", resfile)
+      res <- read.table(resfile, header=T, sep="\t", stringsAsFactors = F)
+      
+      if(nrow(res) > 0){
+        ## note if there is an insertion of multiple bases, count is inflated by the number of bases (all inserted at the "same position").
+        res$count <- apply(res, 1, function(x){
+          if(is.null(x[["count"]])){
+            return(NULL)
+          }else{
+            if((bl <- nchar(x[["base"]])) > 1){
+              return(as.numeric(x[["count"]])/bl)
+            }else{
+              return(as.numeric(x[["count"]]))
+            }
+          }
+        })
+        
+        res$label <- ""
+        res$label[res$ratio < 4] <- res$pos[res$ratio < 4]
+        res$ampid <- amp
+        res$length_cluster <- lc
+        
+        con.chrom <- amp_stats_lenclust_consensus[[pt]]$chrom[amp_stats_lenclust_consensus[[pt]]$ampid == amp][1]
+        con.start <- amp_stats_lenclust_consensus[[pt]]$start[amp_stats_lenclust_consensus[[pt]]$ampid == amp][1]
+        con.end <- amp_stats_lenclust_consensus[[pt]]$end[amp_stats_lenclust_consensus[[pt]]$ampid == amp][1]
+        
+        if(con.chrom == CYP2D6_GENOMIC_CHR){
+          ## check if amplicon overlaps CYP2D6 locus
+          if((con.start <= CYP2D6_GENOMIC_END) && (CYP2D6_GENOMIC_START <= con.end)){
+            ## need to reverse compliment the data, and fix the offset to make sequence positions relative to the CYP2D6 refseq.
+            res <- do.call(rbind, by(res, res$consensus_id, function(x){
+              x <- as.data.frame(x)
+              max_pos <- max(x$pos)
+              x$pos <- max_pos - x$pos + 0.5
+              x$base <- complement_map[x$base]
+              x$base[is.na(x$base)] <- ""
+              offset <- CYP2D6_GENOMIC_END - con.end
+              x$pos <- x$pos + offset
+              return(x)
+            }))
+          }
+        }
+        
+        
+      }
+      consensuses[[pt]] <- rbind(consensuses[[pt]], res)
+    }
+  }
+}
+
+## list of variants, compared to gene of interest (CYP2D6) reference sequence, in each consensus.
+# note if there are no entries for a consensus, then there were no variants.
+variants <- list()
+for(pt in names(consensuses)){
+  variants[[pt]] <- data.frame()
+  for(amp in amp_stats[[pt]]$ampid){
+    for(lc in unique(amp_stats_lenclust_consensus[[pt]]$lenclust[amp_stats_lenclust_consensus[[pt]]$ampid == amp])){
+      dat <- read.table(paste0(ROOT_DIR, pt, "/05_consensus/", pt, "_amp",amp,"_lenclust", lc, "_variants.txt"), header=T, stringsAsFactors=F, sep="\t")
+      if(nrow(dat) > 0){
+        # there are some variants
+        dat$consensus_id <- apply(dat, 1, function(x){
+          return(paste(strsplit(x[["consensus_id"]], "_")[[1]][1:3], collapse="_"))
+        })
+        
+        for(con_id in unique(dat$consensus_id)){
+          x <- subset(dat, consensus_id == con_id)
+          if(nrow(x) < 50){
+            ## consensus likely CYP2D6, report as usual
+            x$ampid <- amp
+            x$length_cluster <- lc
+            variants[[pt]] <- rbind(variants[[pt]], x)
+          }else{
+            ## large number of variants, consensus either not CYP2D6 or is a structural variant
+            x$ampid <- amp
+            x$length_cluster <- lc
+            x <- x[1,]
+            x$variant <- "SV or Off-Target"
+            variants[[pt]] <- rbind(variants[[pt]], x)
+          }
+        }
+        
+      }
+    }
+    
+    ## check for any consensus sequences that did not get any variants recorded
+    for(con_id in unique(consensuses[[pt]]$consensus_id)){
+      if(!con_id %in% variants[[pt]]$consensus_id){
+        x <- data.frame(consensus_id = con_id,
+                        variant = "none",
+                        ampid = amp,
+                        length_cluster = lc)
+        variants[[pt]] <- rbind(variants[[pt]], x)
+      }
+    }
+  }
+  
+  ## process the variants a bit in preparation for plotting
+  if(nrow(variants[[pt]]) > 0){
+      
+    variants[[pt]]$exists <- TRUE
+    
+    ## get position of variant
+    variants[[pt]]$pos <- apply(variants[[pt]], 1, function(x){
+      if(grepl("_", x[["variant"]])){
+        ## insertion, take second position
+        return(gsub("[^0-9]", "", strsplit(x[["variant"]], "_")[[1]][2]))
+      }else{
+        return(gsub("[^0-9]", "", x[["variant"]]))
+      }
+    })
+  
+    ## group variants by exon or intron
+    variants[[pt]]$location <- apply(variants[[pt]], 1, function(x){
+      if(any(sapply(gene_coords, function(vec) x[["pos"]][1] %in% vec))){
+        return("exon")
+      }else if(grepl("5901", x[["variant"]]) | grepl("6866", x[["variant"]]) | grepl("7460", x[["variant"]]) | grepl("7959", x[["variant"]]) | grepl("7970", x[["variant"]]) | grepl("8008", x[["variant"]])){
+        return("splice")
+      }else if(grepl("SV", x[["variant"]])){
+        return("SV")
+      }else if(grepl("none", x[["variant"]])){
+        return("none")
+      }else{
+        return("intron")
+      }
+    })
+    variants[[pt]]$ambiguous <- grepl("N", variants[[pt]]$variant)
+    ## keep variants where the base is undetermined and its an exon or base is determined.
+    variants[[pt]] <- variants[[pt]][!grepl("N",variants[[pt]]$variant) | (grepl("N",variants[[pt]]$variant) & variants[[pt]]$location == "exon"),]
+
+    varpos <- data.frame(unique(variants[[pt]][,c("variant", "pos")]))
+    
+    variants[[pt]]$pharmvar <- variants[[pt]]$pos %in% pois
+    
+    variants[[pt]]$variant <- factor(variants[[pt]]$variant, levels=varpos$var[order(varpos$pos)])
+    variants[[pt]]$pharmvar <- factor(variants[[pt]]$pharmvar, levels=c(TRUE, FALSE))
+    
+    variants[[pt]]$consensus_id <- apply(variants[[pt]], 1, function(x){
+      return(paste(strsplit(x[["consensus_id"]][1], "_")[[1]][1:3], collapse = "_"))
+    })
+  }
+  
+}
+
+## for each consensus, get the closest matched Star Allele genotype for CYP2D6
+## If a consensus had no variants (and thus is wildtype *1), it won't be included in these files and needs to be manually added.
+haplotypes <- list()
+for(pt in names(consensuses)){
+  haplotypes[[pt]] <- data.frame()
+  for(amp in amp_stats[[pt]]$ampid){
+    for(lc in unique(amp_stats_lenclust_consensus[[pt]]$lenclust[amp_stats_lenclust_consensus[[pt]]$ampid == amp])){
+      dat <- read.table(paste0(ROOT_DIR, pt, "/05_consensus/", pt, "_amp",amp,"_lenclust", lc, "_alleles.tsv"), header=T, stringsAsFactors=F, sep="\t")
+      if(nrow(dat) > 0){
+        ## there is at least one genotype for this
+        dat$consensus_id <- apply(dat, 1, function(x){
+          return(paste(strsplit(x[["consensus_id"]], "_")[[1]][1:3], collapse="_"))
+        })
+        dat$ampid <- amp
+        dat$lenclust <- lc
+        for(i in c(1:nrow(dat))){
+          if(dat$score[i] > 50){
+            ## likely an off-target amplicon or SV
+            x <- dat[i,]
+            x$top_allele <- "SV or Off-Target"
+            x$extra_var <- NA
+            x$missing_var <- NA
+            haplotypes[[pt]] <- rbind(haplotypes[[pt]], x)
+          }else{
+            ## normal call
+            x <- dat[i,]
+            haplotypes[[pt]] <- rbind(haplotypes[[pt]], x)
+          }
+        }
+      }
+    }
+  }
+  
+  ## check for any consensus sequences that did not get any genotype recorded (because it is wildtype)
+  for(con_id in unique(consensuses[[pt]]$consensus_id)){
+    if(!con_id %in% haplotypes[[pt]]$consensus_id){
+      x <- data.frame(consensus_id = con_id,
+                      top_allele = "CYP2D6*1",
+                      score = 0,
+                      missing_var = NA,
+                      extra_var = NA,
+                      ampid = amp,
+                      lenclust = lc)
+      haplotypes[[pt]] <- rbind(haplotypes[[pt]], x)
+    }
+  }
+}
+ 
+
+```
+
+## Plots
+
+```{r plots, echo=FALSE, fig.height=6, fig.width=10, results='asis', fig.pos='H'}
+
+## Look at read numbers.
+
+basecall_read_counts_df <- bind_rows(basecall_read_counts, .id = "list_name")
+basecall_read_counts_df <- data.frame(list_name = names(basecall_read_counts_df), counts = unlist(basecall_read_counts_df))
+
+# get candidate counts
+amp_stats_df <- bind_rows(amp_stats, .id = "list_name")
+
+## get length clusters
+amp_stats_lenclust_df <- bind_rows(amp_stats_lenclust, .id = "list_name")
+
+## get consensus attempts
+amp_stats_lenclust_consensus_df <- bind_rows(amp_stats_lenclust_consensus, .id = "list_name")
+
+haplotypes_df <- bind_rows(haplotypes, .id = "list_name")
+amp_stats_lenclust_consensus_df <- merge(amp_stats_lenclust_consensus_df, haplotypes_df, all=T)
+
+write.table(merge(amp_stats_lenclust_df,
+                  amp_stats_lenclust_consensus_df,
+                  all=T),
+            paste(ROOT_DIR,"/summary_all_samples.tsv", sep=""), sep="\t", row.names=F)
+
+
+
+
+## Look at read lengths
+read_lens_df <- bind_rows(read_lens, .id = "list_name")
+read_lens_df$list_name <- factor(read_lens_df$list_name, levels=basecall_read_counts_df$list_name[order(basecall_read_counts_df$counts, decreasing=T)])
+
+read_lens_df$source <- ""
+read_lens_df$source[read_lens_df$list_name %in% IN_HOUSE_CONTROLS] <- "In-house"
+read_lens_df$source[read_lens_df$list_name %in% LIAU_CONTROLS] <- "Liau et al."
+read_lens_df$source[read_lens_df$list_name %in% SRA_CONTROLS] <- "SRA"
+
+
+p <- ggplot(read_lens_df, aes(x=V1)) +
+  geom_histogram() +
+  xlab("Read length") +
+  ylab("Frequency") +
+  facet_wrap(~list_name, scale = "free_y") +
+  scale_x_continuous(labels = scales::comma, limits=c(0, 10100)) +
+  theme_bw() +
+  ggtitle("Read length distribution of basecalled and porechopped reads.")
+print(p)
+
+
+# get frequency of reads longer than 10k for each.
+summary(by(read_lens_df$V1, read_lens_df$list_name, function(x){
+  return(length(x[x>10000])/length(x))
+}))
+
+
+## In house average read length
+summary(subset(read_lens_df, source=="In-house")$V1)
+sd(subset(read_lens_df, source=="In-house")$V1)
+
+
+## Short read frequency
+read_lens_df$short <- read_lens_df$V1 < 1000
+short_reads <- do.call(rbind, by(read_lens_df, read_lens_df$list_name, function(x){
+  return(data.frame(list_name = x[["list_name"]][1], source = x[["source"]][1], short_freq = sum(x[["short"]])/nrow(x)))
+}))
+by(short_reads$short_freq, short_reads$source, mean)
+
+
+
+
+## plot length clusters
+
+p <- ggplot(amp_stats_lenclust_df, aes(x=lenclust_mean_length, y=lenclust_numreads, color=consensus_attempted)) +
+  geom_point() +
+  xlab("Mean Read Length") +
+  ylab("Num Reads in Cluster") +
+  facet_wrap(ampid~list_name, scales="free") +
+  scale_x_continuous(labels = scales::comma, limits=c(0, 10500)) +
+  theme_bw()
+print(p)
+
+
+## look at reads at each step
+
+## basecalled
+combined_read_counts <- data.frame(pt = basecall_read_counts_df$list_name,
+                                   category = "Basecalled",
+                                   group = "Basecalled",
+                                   count = basecall_read_counts_df$counts,
+                                   flagged = T)
+
+## inferred amplicons
+amp_stats_lenclust_df$amp_name <- paste0(amp_stats_lenclust_df$chrom, ":", amp_stats_lenclust_df$start, "-", amp_stats_lenclust_df$end, ";",amp_stats_lenclust_df$length,"bp")
+
+infamp <- unique(amp_stats_lenclust_df[,c("list_name", "amp_name", "numreads")])
+
+combined_read_counts <- rbind(combined_read_counts,
+                              data.frame(pt = infamp$list_name,
+                                         category = "Inferred Amplicons",
+                                         group = infamp$amp_name,
+                                         count = infamp$numreads,
+                                         flagged = T))
+
+## length clusters
+amp_stats_lenclust_df$lc_name <- paste0(amp_stats_lenclust_df$amp_name, "_", amp_stats_lenclust_df$lenclust, "_", amp_stats_lenclust_df$lenclust_mean_length, "bp")
+combined_read_counts <- rbind(combined_read_counts,
+                              data.frame(pt = amp_stats_lenclust_df$list_name,
+                                         category = "Length-Clusters",
+                                         group = amp_stats_lenclust_df$lc_name,
+                                         count = amp_stats_lenclust_df$lenclust_numreads,
+                                         flagged = amp_stats_lenclust_df$consensus_attempted))
+
+## consensus
+combined_read_counts <- rbind(combined_read_counts,
+                              data.frame(pt = amp_stats_lenclust_consensus_df$list_name,
+                                         category = "Consensus",
+                                         group = amp_stats_lenclust_consensus_df$consensus_id,
+                                         count = amp_stats_lenclust_consensus_df$consensus_depth,
+                                         flagged = grepl("*",amp_stats_lenclust_consensus_df$top_allele)))
+
+
+
+
+combined_read_counts$category <- factor(combined_read_counts$category, levels = c("Basecalled", "Inferred Amplicons", "Length-Clusters", "Consensus"))
+p <- ggplot(combined_read_counts, aes(x=category, y=count, group=group, fill=flagged)) +
+  geom_bar(stat="identity", color="#000000") +
+  facet_wrap(~pt, scales="free_y") +
+  xlab("Category") +
+  ylab("Number of Reads") +
+  theme_minimal() +
+  ggtitle("Number of reads at each stage of analysis.") +
+  theme(axis.text.x = element_text(angle=45, hjust=1))
+print(p)
+
+
+
+
+
+
+
+
+
+
+
+for(pt in patients){
+  cat("\n\n\\clearpage\n\n")
+  cat("\n\n\\pagebreak\n\n")
+  print(paste0("## Data for ", pt))
+  
+  
+  ## basecalled reads - note that these are not "passed" basecalled, since we use all in this version.
+  print(paste0(basecall_read_counts[[pt]], " reads after basecalling."))
+  cat("\n")
+  
+  print(paste0(inf_amp[[pt]], " amplicons were inferred based on read mapping to the human genome."))
+  cat("\n")
+  
+  print(xtable(amp_stats_lenclust[[pt]][amp_stats_lenclust[[pt]]$consensus_attempted,]))
+  cat("\n")
+  
+  ## consensus
+  
+  if(nrow(amp_stats_lenclust_consensus[[pt]])>0){
+
+    print(xtable(amp_stats_lenclust_consensus[[pt]][,c("ampid", "numreads", "length", "lenclust", "lenclust_numreads", "lenclust_mean_length", "consensus_id", "consensus_depth")]))
+    cat("\n")
+    
+    ## print matched genotypes
+    print(xtable(haplotypes[[pt]]))
+    cat("\n")
+    
+    ## variants
+    cat("\n\n\\pagebreak\n\n")
+    print(paste0("Detected variants for each consensus:"))
+    cat("\n")
+    
+    if(nrow(variants[[pt]]) > 0){
+    
+
+      p <- ggplot(variants[[pt]], aes(x = ambiguous, y=forcats::fct_rev(variant), fill=location)) +
+        geom_tile(lwd=1, color="black") +
+        theme_bw() +
+        facet_grid(pharmvar+location~consensus_id, scales="free_y", space="free_y") +
+        scale_fill_manual(values = c("darkorange", "mediumorchid", "steelblue", "darkgoldenrod3", "ivory3", "white"), breaks=c("exon", "splice", "intron", "SV", "none", NA)) +
+        xlab("Sample") +
+        ylab("Variant") +
+        ggtitle(pt)
+      print(p)
+      
+    }else{
+      print("No variants detected in any consensus sequence.")
+    }
+    
+    ## print chromatograms for any missing or extra variants, for manual inspection.
+    for(cid in haplotypes[[pt]]$consensus_id){
+      this.dat <- subset(haplotypes[[pt]], consensus_id == cid)
+      ## there may be multiple possible alleles for a given consensus if they score equally.
+      for(rn in c(1:nrow(this.dat))){
+        print(paste(pt, " consensus ", cid, " may be ", this.dat$top_allele[rn], sep=""))
+        cat("\n")
+        if(this.dat$score[rn] > 10){
+          print("Greater than 10 mismatches - likely offtarget, no subsequent plots.")
+        }else{
+          if(!is.na(this.dat$missing_var[rn])){
+            if(this.dat$missing_var[rn] != ""){
+              print("Missing variant(s):")
+              cat("\n")
+              ## missing variants might be of the form "G6866[A]" if its a potentially ambiguous position, so need to handle that.
+              for(v in strsplit(this.dat$missing_var[rn], ",")[[1]]){
+                if(grepl("del", v)){
+                  ## deletion missing
+                  this.pos <- as.numeric(strsplit(v, "del")[[1]][1])
+                }else if(grepl("ins", v)){
+                  ## insertion
+                  this.pos <- as.numeric(strsplit(strsplit(v, "_")[[1]][2], "ins")[[1]][1])
+                }else{
+                  ## snv
+                  this.pos <- as.numeric(gsub("[^0-9]", "", v))
+                }
+                pd <- subset(consensuses[[pt]], pos > this.pos-10 & pos < this.pos+10 & consensus_id == cid)
+                pd$strand[pd$strand=="+"] <- "Forward Reads"
+                pd$strand[pd$strand=="-"] <- "Reverse Reads"
+                print(paste0("Plot."))
+                p <- ggplot(pd, aes(x=as.factor(pos), y=count, color=base)) +
+                    geom_point(aes(shape=top)) +
+                    scale_shape_manual(values=c(1,19)) +
+                    ggrepel::geom_text_repel(aes(label=label)) +
+                    facet_wrap(~strand, ncol=1, scales="free_y") +
+                    scale_color_manual(values=c("T" = "red", "C" = "deepskyblue", "A" = "forestgreen", "G" = "#444444", "N" = "orange", "-" = "purple")) +
+                    theme_minimal() +
+                    theme(axis.title = element_text(), axis.text.x = element_text(angle=45, hjust=1)) +
+                    xlab("Position") +
+                    ylab("Count of reads") +
+                    ggtitle(paste(pt, " - ", cid, " - ", this.dat$top_allele[rn], " - Missing ", v, sep=""))
+                print(p)
+              }
+            }
+          }
+          if(!is.na(this.dat$extra_var[rn])){
+            if(this.dat$extra_var[rn] != ""){
+              print("Extra variant(s):")
+              cat("\n")
+              for(v in strsplit(this.dat$extra_var[rn], ",")[[1]]){
+                if(grepl("del", v)){
+                  ## deletion extra
+                  this.pos <- as.numeric(strsplit(v, "del")[[1]][1])
+                }else if(grepl("ins", v)){
+                  ## insertion
+                  this.pos <- as.numeric(strsplit(strsplit(v, "_")[[1]][2], "ins")[[1]][1])
+                }else{
+                  ## snv
+                  this.pos <- as.numeric(substr(v, 2, nchar(v)-1))
+                }
+                pd <- subset(consensuses[[pt]], pos > this.pos-10 & pos < this.pos+10 & consensus_id == cid)
+                pd$strand[pd$strand=="+"] <- "Forward Reads"
+                pd$strand[pd$strand=="-"] <- "Reverse Reads"
+                print(paste0("Plot."))
+                p <- ggplot(pd, aes(x=as.factor(pos), y=count, color=base)) +
+                    geom_point(aes(shape=top)) +
+                    scale_shape_manual(values=c(1,19)) +
+                    ggrepel::geom_text_repel(aes(label=label)) +
+                    facet_wrap(~strand, ncol=1, scales="free_y") +
+                    scale_color_manual(values=c("T" = "red", "C" = "deepskyblue", "A" = "forestgreen", "G" = "#444444", "N" = "orange", "-" = "purple")) +
+                    theme_minimal() +
+                    theme(axis.title = element_text(), axis.text.x = element_text(angle=45, hjust=1)) +
+                    xlab("Position") +
+                    ylab("Count of reads") +
+                    ggtitle(paste(pt, " - ", cid, " - ", this.dat$top_allele[rn], " - Extra ", v, sep=""))
+                print(p)
+              }
+            }
+          }
+        }
+      }
+    }
+  }else{
+    print(paste("No consensus sequences successfully built for ", pt, ",", sep=""))
+  }
+  
+  cat("\n\n\\pagebreak\n\n")
+  
+  
+}
+
+cat("\n\n\\pagebreak\n\n")
+
+
+## write variants file - all non-intronic.
+
+
+variants_summary <- data.frame()
+for(pt in patients[!grepl("Liau", patients) & !grepl("_rapid", patients)]){
+  for(cid in unique(variants[[pt]]$consensus_id)){
+    if("pos" %in% names(variants[[pt]][variants[[pt]]$consensus_id == cid, ])){
+      vars <- variants[[pt]][,c("variant", "pos")][variants[[pt]]$consensus_id == cid & variants[[pt]]$location != "intron",]
+      vars <- vars[order(vars$pos),]
+      vars <- paste(vars$variant, collapse=",")
+      variants_summary <- rbind(variants_summary,
+                                data.frame(sample_id = pt,
+                                           consensus_id = cid,
+                                           variants = vars))
+    }
+  }
+}
+
+
+write.table(variants_summary,
+          paste(ROOT_DIR, "/variants_summary_all_samples.tsv", sep=""), sep="\t", row.names=F)
+
+
+
+
+```
+
+
+## Manuscript plots
+
+```{r manuscript_plots, eval=FALSE, fig.height=6, fig.width=10, include=FALSE, results='asis'}
+
+
+## FIGURE 1
+## Overview of CYP2D6 locus and amplicons
+
+
+
+variant_pos <- c(5028,5033,5038,5050,5083,5092,5096,5101,5119,5141,5143,5144,5156,5173,5901,5912,5924,5975,5984,5990,5992,6002,6012,6031,6032,6040,6041,6046,6052,6058,6071,6628,6628,6631,6637,6645,6655,6656,6677,6679,6681,6698,6713,6724,6727,6736,6740,6740,6755,6767,6769,6774,6775,6778,6778,6866,6875,6875,6879,6885,6907,6932,6933,6947,6963,6992,6996,6998,6999,7004,7015,7460,7471,7481,7482,7486,7503,7539,7559,7569,7576,7594,7599,7599,7605,7610,7626,7630,7635,7838,7848,7870,7873,7889,7912,7947,7955,7959,7970,8008,8177,8180,8192,8200,8201,8203,8206,8209,8218,8221,8222,8246,8255,8279,8285,8288,8297,8299,8338,8354,8829,8849,8855,8873,8885,8897,8915,8934,9059,9062,9064,9065,9076,9092,9096,9114,9130,9144,9146,9148,9151,9153,9164,9175,9176,9177,9178,9184,9186,9187,9188,9189,9192,9200,9206,9233)
+
+variant_genome_pos <- 42130809-20-(variant_pos-5020)
+
+
+
+
+figa <- data.frame(name="CYP2D6 locus",
+                   start = 42126499,
+                   end = 42130809)
+
+
+figa <- rbind(figa,
+              data.frame(name="CYP2D7 locus",
+                   start = 42140203,
+                   end = 42144577))
+
+figa <- rbind(figa,
+              data.frame(name="informative region",
+                         start = 42126578,
+                         end = 42130783))
+
+figa <- rbind(figa,
+              data.frame(name="variants",
+                         start = variant_genome_pos,
+                         end = variant_genome_pos+1))
+
+figa <- rbind(figa,
+              data.frame(name="Ammar amplicon",
+                         start = 42126072,
+                         end = 42131142))
+
+figa <- rbind(figa,
+              data.frame(name="Liau amplicon",
+                         start = 42130809-20-9774,
+                         end = 42130809-20+1835))
+
+figa <- rbind(figa,
+              data.frame(name="SRA amplicon",
+                         start = 42126034,
+                         end = 42131132))
+
+figa <- rbind(figa,
+              data.frame(name="CYP2D6 CDS",
+                         start = 42130809-20-(5199-5020),
+                         end = 42130809-20-(5020-5020)))
+figa <- rbind(figa,
+              data.frame(name="CYP2D6 CDS",
+                         start = 42130809-20-(6073-5020),
+                         end = 42130809-20-(5902-5020)))
+figa <- rbind(figa,
+              data.frame(name="CYP2D6 CDS",
+                         start = 42130809-20-(6778-5020),
+                         end = 42130809-20-(6626-5020)))
+figa <- rbind(figa,
+              data.frame(name="CYP2D6 CDS",
+                         start = 42130809-20-(7027-5020),
+                         end = 42130809-20-(6867-5020)))
+figa <- rbind(figa,
+              data.frame(name="CYP2D6 CDS",
+                         start = 42130809-20-(7637-5020),
+                         end = 42130809-20-(7461-5020)))
+figa <- rbind(figa,
+              data.frame(name="CYP2D6 CDS",
+                         start = 42130809-20-(7969-5020),
+                         end = 42130809-20-(7828-5020)))
+figa <- rbind(figa,
+              data.frame(name="CYP2D6 CDS",
+                         start = 42130809-20-(8364-5020),
+                         end = 42130809-20-(8177-5020)))
+figa <- rbind(figa,
+              data.frame(name="CYP2D6 CDS",
+                         start = 42130809-20-(8960-5020),
+                         end = 42130809-20-(8819-5020)))
+figa <- rbind(figa,
+              data.frame(name="CYP2D6 CDS",
+                         start = 42130809-20-(9237-5020),
+                         end = 42130809-20-(9059-5020)))
+## CYP2D7 exons:
+figa <- rbind(figa,
+              data.frame(name="CYP2D7 CDS",
+                         start = 42144284,
+                         end = 42144464))
+figa <- rbind(figa,
+              data.frame(name="CYP2D7 CDS",
+                         start = 42143410,
+                         end = 42143581))
+figa <- rbind(figa,
+              data.frame(name="CYP2D7 CDS",
+                         start = 42142728,
+                         end = 42142880))
+figa <- rbind(figa,
+              data.frame(name="CYP2D7 CDS",
+                         start = 42142479,
+                         end = 42142639))
+figa <- rbind(figa,
+              data.frame(name="CYP2D7 CDS",
+                         start = 42141868,
+                         end = 42142044))
+figa <- rbind(figa,
+              data.frame(name="CYP2D7 CDS",
+                         start = 42141534,
+                         end = 42141675))
+figa <- rbind(figa,
+              data.frame(name="CYP2D7 CDS",
+                         start = 42141152,
+                         end = 42141396))
+figa <- rbind(figa,
+              data.frame(name="CYP2D7 CDS",
+                         start = 42140555,
+                         end = 42140696))
+figa <- rbind(figa,
+              data.frame(name="CYP2D7 CDS",
+                         start = 42140280,
+                         end = 42140456))
+
+
+
+figa$name <- factor(figa$name, levels = rev(c("CYP2D7 locus", "CYP2D6 locus", "CYP2D6 CDS", "CYP2D7 CDS", "informative region", "variants", "Ammar amplicon", "Liau amplicon", "SRA amplicon")))
+
+(p <- ggplot(figa, aes(y=name)) +
+    geom_segment(aes(x = start, xend = end), size=3) +
+    scale_x_continuous(labels = scales::comma) +
+    xlab("Chromosome 22") +
+    theme_classic())
+if(interactive()){
+  ggsave("figures/genomic_locus_overview4.pdf", p, width=8.5, height=4)
+}
+
+
+
+
+
+
+## FIGURE 2
+(p <- ggplot(subset(read_lens_df, list_name %in% c(IN_HOUSE_CONTROLS, LIAU_CONTROLS, SRA_CONTROLS)), aes(x=V1)) +
+  geom_histogram(aes(fill=source)) +
+  xlab("Read length") +
+  ylab("Count of Reads") +
+  facet_wrap(~list_name, scale = "free_y") +
+  scale_x_continuous(labels = scales::comma, limits=c(0, 10100)) +
+  #scale_fill_jco() +
+  scale_fill_d3() +
+  theme_classic())
+if(interactive()){
+  ggsave("figures/READ_LEN_DIST.pdf", p, width=8*1.5, height=4*1.5, dpi = 300)
+}
+
+
+
+
+## FIGURE 5
+figd <- variants[["NA17058_ligate"]]
+figd$sample <- "NA17058_ligate"
+figd.tmp <- variants[["NA17280_ligate"]]
+figd.tmp$sample <- "NA17280_ligate"
+figd <- rbind(figd, figd.tmp)
+
+figd$allele <- ""
+figd$allele[figd$consensus_id == "amp0_lenclust1_1"] <- "CYP2D6*10"
+figd$allele[figd$consensus_id == "amp0_lenclust1_2"] <- "CYP2D6*36"
+figd$allele[figd$consensus_id == "amp0_lenclust2_1"] <- "CYP2D6*3"
+figd$allele[figd$consensus_id == "amp0_lenclust2_3"] <- "CYP2D6*59"
+
+
+figd$variant <- factor(figd$variant, levels=unique(figd$variant[order(figd$pos, decreasing=T)]))
+
+(p <- ggplot(figd, aes(x=allele, y=variant)) +
+  geom_point(size=3, aes(color=location)) +
+  scale_color_manual(values = c("darkorange", "mediumorchid", "steelblue", "darkgoldenrod3", "ivory3", "white"), breaks=c("exon", "splice", "intron", "SV", "none", NA)) +
+  facet_grid(location~sample, scales="free", space="free") +
+  xlab("Star-Allele") +
+  ylab("Detected Variants") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle=45, hjust=1), legend.position = "bottom", legend.direction = "horizontal"))
+ggsave("figures/figd.pdf", p, width=4, height=6.5)
+
+
+
+## FIGURE 4
+pt <- "NA23348"
+position <- 7599
+pd <- subset(consensuses[[pt]], pos > (position-10) & pos < (position+10))
+pd <- subset(pd, (pd$pos*2)%%2==0)  ## for plotting, get rid of "inbetween" spots.
+pd$strand[pd$strand=="+"] <- "Forward Reads\n(Positive Strand)"
+pd$strand[pd$strand=="-"] <- "Reverse Reads\n(Negative Strand)"
+
+pd <- subset(pd, consensus_id == "amp0_lenclust0_1")
+pd$allele <- "CYP2D6*7"
+pd <- subset(pd, count > 0)
+(p <- ggplot(pd, aes(x=as.factor(pos), y=count, color=base, size=mean_quality)) +
+    geom_point(aes(shape=top)) +
+    scale_shape_manual(values=c(1,19)) +
+    ggrepel::geom_text_repel(aes(label=label)) +
+    facet_grid(strand~allele, scales="free_y") +
+    scale_color_manual(values=c("T" = "red", "C" = "deepskyblue", "A" = "forestgreen", "G" = "#444444", "N" = "orange", "-" = "purple")) +
+    scale_size_continuous(breaks=c(10,15,20,25,30,35), name="Mean Quality\nScore") +
+    theme_minimal() +
+    theme(axis.title = element_text(), axis.text.x = element_text(angle=45, hjust=1)) +
+    xlab("Position") +
+    ylab("Count of reads") +
+    ggtitle(paste(pt, " - 7599delC", sep="")))
+ggsave("figures/chromat_NA23348_7_qsize_full.pdf", p, width=5, height=4)
+(p <- ggplot(pd, aes(x=as.factor(pos), y=count, color=base, size=mean_quality)) +
+    geom_point(aes(shape=top)) +
+    scale_shape_manual(values=c(1,19)) +
+    ggrepel::geom_text_repel(aes(label=label)) +
+    facet_grid(strand~allele, scales="free_y") +
+    scale_color_manual(values=c("T" = "red", "C" = "deepskyblue", "A" = "forestgreen", "G" = "#444444", "N" = "orange", "-" = "purple")) +
+    scale_size_continuous(breaks=c(10,15,20,25,30,35), name="Mean Quality\nScore") +
+    theme_minimal() +
+    theme(axis.title = element_text(), axis.text.x = element_text(angle=45, hjust=1), legend.position = "none") +
+    xlab("Position") +
+    ylab("Count of reads") +
+    ggtitle(paste(pt, " - 7599delC", sep="")))
+ggsave("figures/chromat_NA23348_7_qsize.pdf", p, width=5, height=4)
+
+
+pt <- "NA17300"
+position <- 6996
+pd <- subset(consensuses[[pt]], pos > (position-10) & pos < (position+10))
+pd <- subset(pd, (pd$pos*2)%%2==0)  ## for plotting, get rid of "inbetween" spots.
+pd$strand[pd$strand=="+"] <- "Forward Reads\n(Positive Strand)"
+pd$strand[pd$strand=="-"] <- "Reverse Reads\n(Negative Strand)"
+
+pd <- subset(pd, consensus_id == "amp0_lenclust1_2")
+pd$allele <- "CYP2D6*6"
+pd <- subset(pd, count > 0)
+(p <- ggplot(pd, aes(x=as.factor(pos), y=count, color=base, size=mean_quality)) +
+    geom_point(aes(shape=top)) +
+    scale_shape_manual(values=c(1,19)) +
+    ggrepel::geom_text_repel(aes(label=label)) +
+    facet_grid(strand~allele, scales="free_y") +
+    scale_color_manual(values=c("T" = "red", "C" = "deepskyblue", "A" = "forestgreen", "G" = "#444444", "N" = "orange", "-" = "purple")) +
+    scale_size_continuous(breaks=c(10,15,20,25,30,35), name="Mean Quality\nScore") +
+    theme_minimal() +
+    theme(axis.title = element_text(), axis.text.x = element_text(angle=45, hjust=1), legend.position = "none") +
+    xlab("Position") +
+    ylab("Count of reads") +
+    ggtitle(paste(pt, " - G6996A", sep="")))
+ggsave("figures/chromat_NA17300_6_qsize.pdf", p, width=5, height=4)
+
+
+pt <- "NA10005"
+position <- 6041
+pd <- subset(consensuses[[pt]], pos > (position-10) & pos < (position+10))
+pd <- subset(pd, (pd$pos*2)%%2==0)  ## for plotting, get rid of "inbetween" spots.
+pd$strand[pd$strand=="+"] <- "Forward Reads\n(Positive Strand)"
+pd$strand[pd$strand=="-"] <- "Reverse Reads\n(Negative Strand)"
+
+pd <- subset(pd, consensus_id == "amp0_lenclust2_11")
+pd$allele <- "CYP2D6*17"
+pd <- subset(pd, count > 0)
+(p <- ggplot(pd, aes(x=as.factor(pos), y=count, color=base, size=mean_quality)) +
+    geom_point(aes(shape=top)) +
+    scale_shape_manual(values=c(1,19)) +
+    ggrepel::geom_text_repel(aes(label=label)) +
+    facet_grid(strand~allele, scales="free_y") +
+    scale_color_manual(values=c("T" = "red", "C" = "deepskyblue", "A" = "forestgreen", "G" = "#444444", "N" = "orange", "-" = "purple")) +
+    scale_size_continuous(breaks=c(10,15,20,25,30,35), name="Mean Quality\nScore") +
+    theme_minimal() +
+    theme(axis.title = element_text(), axis.text.x = element_text(angle=45, hjust=1), legend.position = "none") +
+    xlab("Position") +
+    ylab("Count of reads") +
+    ggtitle(paste(pt, " - C6041T", sep="")))
+ggsave("figures/chromat_NA10005_17_qsize.pdf", p, width=5, height=4)
+
+pt <- "NA10005"
+position <- 6041
+pd <- subset(consensuses[[pt]], pos > (position-10) & pos < (position+10))
+pd <- subset(pd, (pd$pos*2)%%2==0)  ## for plotting, get rid of "inbetween" spots.
+pd$strand[pd$strand=="+"] <- "Forward Reads\n(Positive Strand)"
+pd$strand[pd$strand=="-"] <- "Reverse Reads\n(Negative Strand)"
+
+pd <- subset(pd, consensus_id %in% c("amp0_lenclust2_8"))
+pd$allele <- "CYP2D6*29"
+pd <- subset(pd, count > 0)
+(p <- ggplot(pd, aes(x=as.factor(pos), y=count, color=base, size=mean_quality)) +
+    geom_point(aes(shape=top)) +
+    scale_shape_manual(values=c(1,19)) +
+    ggrepel::geom_text_repel(aes(label=label)) +
+    facet_grid(strand~allele, scales="free_y") +
+    scale_color_manual(values=c("T" = "red", "C" = "deepskyblue", "A" = "forestgreen", "G" = "#444444", "N" = "orange", "-" = "purple")) +
+    scale_size_continuous(breaks=c(10,15,20,25,30,35), name="Mean Quality\nScore") +
+    theme_minimal() +
+    theme(axis.title = element_text(), axis.text.x = element_text(angle=45, hjust=1), legend.position = "none") +
+    xlab("Position") +
+    ylab("Count of reads") +
+    ggtitle(paste(pt, " - C6041T", sep="")))
+ggsave("figures/chromat_NA10005_29_qsize.pdf", p, width=5, height=4)
+
+```

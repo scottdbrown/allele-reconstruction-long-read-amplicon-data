@@ -1,0 +1,8 @@
+name: CYP2D6_ONT_allele_reconstruction_porechop
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+  - anaconda
+dependencies:
+  - porechop==0.2.4
