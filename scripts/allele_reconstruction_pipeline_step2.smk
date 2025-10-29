@@ -9,6 +9,8 @@
 from Bio import SeqIO
 import os
 
+WORKFLOW_DIR = os.path.dirname(os.path.abspath(workflow.snakefile))
+
 ## Load Config
 NG_008376_REFSEQ = config["NG_008376_REFSEQ"]
 HUMAN_REF = config["HUMAN_REF"]
@@ -21,8 +23,6 @@ SCRATCH_DIR = config["SCRATCH_DIR"]
 
 
 SAMPLES = os.listdir(BASECALLED_DIR)
-## TODO REMOVE THE BELOW BEFORE PUSHING TODO ##
-SAMPLES = [cont for cont in SAMPLES if "barcode" not in cont and "rapid" not in cont and "SMRT" not in cont and "SRR" not in cont and cont.startswith("NA")]
 
 ## get specific basecall root dir for each 
 BD = {}
@@ -91,6 +91,7 @@ rule get_candidate_readnames:
         txt = os.path.join(SCRATCH_DIR, "{sample}", "01_alignment", "candidate_readnames_amp{ampid}.txt")
     resources:
         single_concurrent=1
+    conda: "env/conda_env.yaml"
     shell:
         """samtools view -L {input.amplicon_region} {input.bam} | awk '{{print $1}}' | sort | uniq > {output.txt}"""
 
@@ -139,59 +140,63 @@ rule length_based_clustering:
         allowed_neighbour_length_variability = 10,
         min_core_point_neighbours = lambda wildcards: int((sum(1 for line in open(os.path.join(SCRATCH_DIR, f"{wildcards.sample}", "01_alignment", f"candidate_reads_amp{wildcards.ampid}.fastq")))/4) * 0.001),     ## 0.1 % of reads.
         output_dir = lambda wildcards: os.path.join(SCRATCH_DIR, f"{wildcards.sample}", "02_clusters"),
-    run:
-        import numpy as np
-        from sklearn.cluster import DBSCAN
-        from collections import defaultdict
+        script = os.path.join(WORKFLOW_DIR,"read_length_clustering.py"),
+    conda: "env/conda_env.yaml"
+    shell:
+        "python {params.script} --fastq {input.FASTQ} --anlv {params.allowed_neighbour_length_variability} --mcpc {params.min_core_point_neighbours} --outdir {params.output_dir} --cluster_stats {output.cluster_stats} --lcf {output.LENGTH_CLUSTERING_FLAG} --ampid {wildcards.ampid}"
+    # run:
+    #     import numpy as np
+    #     from sklearn.cluster import DBSCAN
+    #     from collections import defaultdict
 
-        def read_fastq(file_path):
-            sequences = []
-            headers = []
-            qualities = []
-            with open(file_path, "r") as f:
-                while True:
-                    header = f.readline().strip()
-                    if not header:
-                        break
-                    sequence = f.readline().strip()
-                    plus = f.readline().strip()
-                    quality = f.readline().strip()
-                    headers.append(header)
-                    sequences.append(sequence)
-                    qualities.append(quality)
-            return headers, sequences, qualities
+    #     def read_fastq(file_path):
+    #         sequences = []
+    #         headers = []
+    #         qualities = []
+    #         with open(file_path, "r") as f:
+    #             while True:
+    #                 header = f.readline().strip()
+    #                 if not header:
+    #                     break
+    #                 sequence = f.readline().strip()
+    #                 plus = f.readline().strip()
+    #                 quality = f.readline().strip()
+    #                 headers.append(header)
+    #                 sequences.append(sequence)
+    #                 qualities.append(quality)
+    #         return headers, sequences, qualities
 
-        def write_fastq(file_path, headers, sequences, qualities):
-            with open(file_path, 'w') as f:
-                for header, sequence, quality in zip(headers, sequences, qualities):
-                    f.write(f"{header}\n{sequence}\n+\n{quality}\n")
+    #     def write_fastq(file_path, headers, sequences, qualities):
+    #         with open(file_path, 'w') as f:
+    #             for header, sequence, quality in zip(headers, sequences, qualities):
+    #                 f.write(f"{header}\n{sequence}\n+\n{quality}\n")
 
-        if not os.path.isdir(params.output_dir):
-            os.mkdir(params.output_dir)
+    #     if not os.path.isdir(params.output_dir):
+    #         os.mkdir(params.output_dir)
 
-        headers, sequences, qualities = read_fastq(input.FASTQ)
-        lengths = np.array([len(seq) for seq in sequences]).reshape(-1, 1)
+    #     headers, sequences, qualities = read_fastq(input.FASTQ)
+    #     lengths = np.array([len(seq) for seq in sequences]).reshape(-1, 1)
 
-        # Perform DBSCAN clustering
-        dbscan = DBSCAN(eps=params.allowed_neighbour_length_variability, min_samples=params.min_core_point_neighbours).fit(lengths)
-        clusters = dbscan.labels_
+    #     # Perform DBSCAN clustering
+    #     dbscan = DBSCAN(eps=params.allowed_neighbour_length_variability, min_samples=params.min_core_point_neighbours).fit(lengths)
+    #     clusters = dbscan.labels_
 
-        # Create subsets based on clusters
-        clustered_data = defaultdict(list)
-        for cluster_id, header, sequence, quality, length in zip(clusters, headers, sequences, qualities, lengths):
-            clustered_data[cluster_id].append((header, sequence, quality, length))
-        out = open(output.cluster_stats, "w")
-        out.write("cluster\tnum_reads\tmean_length\n")
-        # Write subsets to files
-        for cluster_id, data in clustered_data.items():
-            subset_file = f'{params.output_dir}/amp{wildcards.ampid}_cluster{cluster_id}.fastq'
-            subset_headers, subset_sequences, subset_qualities, subset_lengths = zip(*data)
-            out.write("{}\t{}\t{}\n".format(cluster_id, len(subset_headers), (sum(subset_lengths)/len(subset_lengths))[0]))
-            write_fastq(subset_file, subset_headers, subset_sequences, subset_qualities)
-        out.close()
+    #     # Create subsets based on clusters
+    #     clustered_data = defaultdict(list)
+    #     for cluster_id, header, sequence, quality, length in zip(clusters, headers, sequences, qualities, lengths):
+    #         clustered_data[cluster_id].append((header, sequence, quality, length))
+    #     out = open(output.cluster_stats, "w")
+    #     out.write("cluster\tnum_reads\tmean_length\n")
+    #     # Write subsets to files
+    #     for cluster_id, data in clustered_data.items():
+    #         subset_file = f'{params.output_dir}/amp{wildcards.ampid}_cluster{cluster_id}.fastq'
+    #         subset_headers, subset_sequences, subset_qualities, subset_lengths = zip(*data)
+    #         out.write("{}\t{}\t{}\n".format(cluster_id, len(subset_headers), (sum(subset_lengths)/len(subset_lengths))[0]))
+    #         write_fastq(subset_file, subset_headers, subset_sequences, subset_qualities)
+    #     out.close()
 
-        # write flag.
-        out = open(output.LENGTH_CLUSTERING_FLAG, "w")
-        out.write("{}\n".format(params.min_core_point_neighbours))
-        out.close()
+    #     # write flag.
+    #     out = open(output.LENGTH_CLUSTERING_FLAG, "w")
+    #     out.write("{}\n".format(params.min_core_point_neighbours))
+    #     out.close()
 

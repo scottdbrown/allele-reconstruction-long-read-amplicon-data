@@ -15,6 +15,8 @@ import os
 import glob
 import re
 
+WORKFLOW_DIR = os.path.dirname(os.path.abspath(workflow.snakefile))
+
 ## Load Config
 NG_008376_REFSEQ = config["NG_008376_REFSEQ"]
 HUMAN_REF = config["HUMAN_REF"]
@@ -30,8 +32,6 @@ SCRATCH_DIR = config["SCRATCH_DIR"]
 
 
 SAMPLES = os.listdir(BASECALLED_DIR)
-## TODO REMOVE THE BELOW BEFORE PUSHING TODO ##
-SAMPLES = [cont for cont in SAMPLES if "barcode" not in cont and "rapid" not in cont and "SMRT" not in cont and "SRR" not in cont and cont.startswith("NA")]
 
 ## get specific basecall root dir for each 
 BD = {}
@@ -112,6 +112,7 @@ rule alignment_for_consensus_paf:
         refseq = lambda wildcards: LENGTH_CLUSTERS[wildcards.sample][wildcards.ampid][1]
     output:
         paf = os.path.join(SCRATCH_DIR, "{sample}", "04_alignment", "amp{ampid}_lenclust{cluster_id}_alignment.paf")
+    conda: "env/conda_env.yaml"
     shell:
         "minimap2 -x map-ont --cs {input.refseq} {input.fastq} > {output.paf}"
 
@@ -131,13 +132,14 @@ rule consensus_05:
         consensus = os.path.join(WORKING_DIR, "{sample}", "05_consensus", "{sample}_amp{ampid}_lenclust{cluster_id}_consensus.fasta"),
         chromat = os.path.join(WORKING_DIR, "{sample}", "05_consensus", "{sample}_amp{ampid}_lenclust{cluster_id}_chromatogram-data.tsv"),
     params:
-        script = "./recursive_allele_reconstruction.py",
+        script = os.path.join(WORKFLOW_DIR,"recursive_allele_reconstruction.py"),
         min_depth_factor = 0.25,
         signal_to_noise = 2,
         global_min_depth_thresh = 0.05,
         min_base_qual_percentile = 33,
         min_base_qual_global = 10,
         name = lambda wildcards: f"amp{wildcards.ampid}_lenclust{wildcards.cluster_id}",
+    conda: "env/conda_env.yaml"
     shell:
         """python {params.script} \
         -v \
@@ -162,9 +164,10 @@ rule annotate_variants_05:
     output:
         variants = os.path.join(WORKING_DIR, "{sample}", "05_consensus", "{sample}_amp{ampid}_lenclust{cluster_id}_variants.txt")
     params:
-        script = "./CYP2D6_variant_enumeration.py",
+        script = os.path.join(WORKFLOW_DIR,"CYP2D6_variant_enumeration.py"),
         GENE_START_POS = 5001,
         GENE_END_POS = 9312
+    conda: "env/conda_env.yaml"
     shell:
         "python {params.script} --reference {input.refseq} --consensus {input.consensus} --gene_start {params.GENE_START_POS} --gene_end {params.GENE_END_POS} --output {output.variants}"
 
@@ -172,12 +175,14 @@ rule annotate_variants_05:
 rule genotype_variants_05:
     '''From the conensus sequence(s), annotate variants'''
     input:
+        refseq = NG_008376_REFSEQ,
         hapdef = STAR_ALLELE_DEFINITIONS,
         variants = rules.annotate_variants_05.output.variants
     output:
         genotypes = os.path.join(WORKING_DIR, "{sample}", "05_consensus", "{sample}_amp{ampid}_lenclust{cluster_id}_alleles.tsv")
     params:
-        script = "./CYP2D6_allele_matcher.py"
+        script = os.path.join(WORKFLOW_DIR,"CYP2D6_allele_matcher.py")
+    conda: "env/conda_env.yaml"
     shell:
-        "python {params.script} --hapdef {input.hapdef} --variants {input.variants} --output {output.genotypes}"
+        "python {params.script} --ref {input.refseq} --hapdef {input.hapdef} --variants {input.variants} --output {output.genotypes}"
 

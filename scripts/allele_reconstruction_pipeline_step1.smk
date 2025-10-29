@@ -24,8 +24,6 @@ SCRATCH_DIR = config["SCRATCH_DIR"]
 
 
 SAMPLES = os.listdir(BASECALLED_DIR)
-## TODO REMOVE THE BELOW BEFORE PUSHING TODO ##
-SAMPLES = [cont for cont in SAMPLES if "barcode" not in cont and "rapid" not in cont and "SMRT" not in cont and "SRR" not in cont and cont.startswith("NA")]
 
 ## get specific basecall root dir for each 
 BD = {}
@@ -98,6 +96,7 @@ rule alignment_sam_01:
     output:
         sam = os.path.join(SCRATCH_DIR, "{sample}", "01_alignment", "alignment_genome_01.sam")
     threads: 4
+    conda: "env/conda_env.yaml"
     shell:
         "minimap2 -x map-ont --secondary=no -t {threads} -a {input.refseq} {input.fastq} > {output.sam}"
 
@@ -107,6 +106,7 @@ rule sort_and_index:
         sam = rules.alignment_sam_01.output.sam
     output:
         bam = os.path.join(SCRATCH_DIR, "{sample}", "01_alignment", "alignment_genome_01.bam")
+    conda: "env/conda_env.yaml"
     shell:
         """samtools sort -o {output.bam} {input.sam}; samtools index {output.bam}"""
 
@@ -116,6 +116,7 @@ rule depth_genome:
         bam = rules.sort_and_index.output.bam
     output:
         depthfile = os.path.join(SCRATCH_DIR, "{sample}", "01_alignment", "alignment_genome_01.depth")
+    conda: "env/conda_env.yaml"
     shell:
         """samtools depth {input.bam} > {output.depthfile}"""
 
@@ -136,6 +137,7 @@ rule merge_regions:
         high_coverage_bed = rules.get_high_coverage.output.high_coverage_bed
     output:
         inferred_amplicon = os.path.join(SCRATCH_DIR, "{sample}", "01_alignment", "alignment_genome_01.amplicons.bed")
+    conda: "env/conda_env.yaml"
     shell:
         """bedtools merge -d 100 -i {input.high_coverage_bed} > {output.inferred_amplicon}"""
 
@@ -147,6 +149,7 @@ rule extract_ref_sequence:
         inferred_amplicon_seqs = os.path.join(SCRATCH_DIR, "{sample}", "01_alignment", "alignment_genome_01.inferred_amplicon_seqs.fasta")
     params:
         refseq = HUMAN_REF
+    conda: "env/conda_env.yaml"
     shell:
         """bedtools getfasta -fi {params.refseq} -bed {input.inferred_amplicon} -fo {output.inferred_amplicon_seqs}"""
 

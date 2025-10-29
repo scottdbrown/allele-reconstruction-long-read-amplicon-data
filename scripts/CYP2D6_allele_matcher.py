@@ -58,6 +58,7 @@ if __name__ == "__main__":
 
     ## Deal with command line arguments
     parser = argparse.ArgumentParser(description = TITLE)
+    parser.add_argument("--ref", dest = "REF", help = "Reference sequence", type = str)
     parser.add_argument("--hapdef", dest = "HAPDEF", help = "CYP2D6 Haplotype definition file", type = str)
     parser.add_argument("--variants", dest = "VARIANTS", help = "Consensus variant list", type = str)
     parser.add_argument("--output", help = "haplotypes output file", type = str)
