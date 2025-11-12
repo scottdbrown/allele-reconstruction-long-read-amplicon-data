@@ -1,6 +1,6 @@
 # A Novel Algorithm for Allele Reconstruction of Pharmacogenes from Oxford Nanopore Technologies’ Amplicon-Derived Long Reads
 
-Pre-print: [INSERT_BIORXIV]
+Pre-print: https://doi.org/10.1101/2025.11.06.687066
 
 ## Install Required Software
 
